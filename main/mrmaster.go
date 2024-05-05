@@ -15,6 +15,7 @@ import "os"
 import "fmt"
 
 func main() {
+	// 入参校验
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrmaster inputfiles...\n")
 		os.Exit(1)

@@ -28,7 +28,7 @@ const (
 )
 
 type Master struct {
-	TaskQueue     chan *Task          // 等待执行的task
+	TaskQueue     chan *Task          // 等待执行的task，包括 map 任务 和 reduce 任务
 	TaskMeta      map[int]*MasterTask // 当前所有task的信息
 	MasterPhase   State               // Master的阶段
 	NReduce       int
@@ -43,19 +43,18 @@ type MasterTask struct {
 }
 
 type Task struct {
-	Input         string
-	TaskState     State
+	Input         string // 输入文件
+	TaskState     State  // 任务所处的阶段
 	NReducer      int
 	TaskNumber    int
 	Intermediates []string
 	Output        string
 }
 
+// 互斥锁
 var mu sync.Mutex
 
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (m *Master) server() {
 	rpc.Register(m)
 	rpc.HandleHTTP()
@@ -69,10 +68,8 @@ func (m *Master) server() {
 	go http.Serve(l, nil)
 }
 
-//
 // main/mrmaster.go calls Exit() periodically to find out
-// if the entire job has finished.
-//
+// 判断本次 mapreduce 计算 job 是否结束
 func (m *Master) Done() bool {
 	mu.Lock()
 	defer mu.Unlock()
@@ -80,14 +77,12 @@ func (m *Master) Done() bool {
 	return ret
 }
 
-//
-// create a Master.
-// main/mrmaster.go calls this function.
-// nReduce is the number of reduce tasks to use.
-//
+// 创建一个 Master 并启动
+// files：输入的文件
+// nReduce： reduce 任务的个数
 func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{
-		TaskQueue:     make(chan *Task, max(nReduce, len(files))),
+		TaskQueue:     make(chan *Task, max(nReduce, len(files))), // 大小为 M，R 的最大值
 		TaskMeta:      make(map[int]*MasterTask),
 		MasterPhase:   Map,
 		NReduce:       nReduce,
@@ -127,13 +122,13 @@ func (m *Master) catchTimeOut() {
 }
 
 func (m *Master) createMapTask() {
-	// 根据传入的filename，每个文件对应一个map task
+	// 根据传入的filename，每个文件对应一个 map 任务
 	for idx, filename := range m.InputFiles {
 		taskMeta := Task{
 			Input:      filename,
 			TaskState:  Map,
 			NReducer:   m.NReduce,
-			TaskNumber: idx,
+			TaskNumber: idx, // 任务号
 		}
 		m.TaskQueue <- &taskMeta
 		m.TaskMeta[idx] = &MasterTask{
@@ -200,7 +195,7 @@ func (m *Master) TaskCompleted(task *Task, reply *ExampleReply) error {
 	return nil
 }
 
-func (m *Master) processTaskResult(task *Task)  {
+func (m *Master) processTaskResult(task *Task) {
 	mu.Lock()
 	defer mu.Unlock()
 	switch task.TaskState {
