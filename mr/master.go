@@ -13,7 +13,7 @@ import (
 type MasterTaskStatus int
 
 const (
-	Idle MasterTaskStatus = iota
+	Idle MasterTaskStatus = iota // 空闲状态
 	InProgress
 	Completed
 )
@@ -30,42 +30,44 @@ const (
 type Master struct {
 	TaskQueue     chan *Task          // 等待执行的task，包括 map 任务 和 reduce 任务
 	TaskMeta      map[int]*MasterTask // 当前所有task的信息
-	MasterPhase   State               // Master的阶段
+	MasterPhase   State               // Master的阶段，map、reduce、Exit
 	NReduce       int
 	InputFiles    []string
 	Intermediates [][]string // Map任务产生的R个中间文件的信息
 }
 
+// 对map任务和reduce任务做了一个封装
 type MasterTask struct {
-	TaskStatus    MasterTaskStatus
+	TaskStatus    MasterTaskStatus // InProgress、Completed、Idle
 	StartTime     time.Time
 	TaskReference *Task
 }
 
 type Task struct {
-	Input         string // 输入文件
+	Input         string // 输入文件名
 	TaskState     State  // 任务所处的阶段
-	NReducer      int
+	NReducer      int    // reduce的个数
 	TaskNumber    int
-	Intermediates []string
+	Intermediates []string // map函数执行后结果的存放文件路径
 	Output        string
 }
 
 // 互斥锁
 var mu sync.Mutex
 
-// start a thread that listens for RPCs from worker.go
+// 启动一个协程来监听来自 work 的 rpc 请求
 func (m *Master) server() {
-	rpc.Register(m)
-	rpc.HandleHTTP()
+	rpc.Register(m)  // 使用 Go 语言标准库中的 RPC
+	rpc.HandleHTTP() // 采用http作为RPC的载体，设置了一个默认路由，并将rpc server作为一个http handler
 	//l, e := net.Listen("tcp", ":1234")
+
 	sockname := masterSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
+	os.Remove(sockname)                  // 删除unix套接字对应地址中已存在的文件
+	l, e := net.Listen("unix", sockname) // 监听 unix 本地套接字
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, nil)
+	go http.Serve(l, nil) // 启动服务，使用默认的多路复用器
 }
 
 // main/mrmaster.go calls Exit() periodically to find out
@@ -78,11 +80,12 @@ func (m *Master) Done() bool {
 }
 
 // 创建一个 Master 并启动
+
 // files：输入的文件
 // nReduce： reduce 任务的个数
 func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{
-		TaskQueue:     make(chan *Task, max(nReduce, len(files))), // 大小为 M，R 的最大值
+		TaskQueue:     make(chan *Task, max(nReduce, len(files))), // 大小为 M，R 的最大值，Go 语言中没有队列的数据结构，故使用 chan 来代替
 		TaskMeta:      make(map[int]*MasterTask),
 		MasterPhase:   Map,
 		NReduce:       nReduce,
@@ -94,10 +97,11 @@ func MakeMaster(files []string, nReduce int) *Master {
 	// 创建map任务
 	m.createMapTask()
 
-	// 一个程序成为master，其他成为worker
-	//这里就是启动master 服务器就行了，
-	//拥有master代码的就是master，别的发RPC过来的都是worker
+	// 一个程序成为 master，其他成为worker
+	// 这里就是启动 master 服务器就行了，
+	// 拥有 master 代码的就是 master，别的发 RPC 过来的都是 worker
 	m.server()
+
 	// 启动一个goroutine 检查超时的任务
 	go m.catchTimeOut()
 	return &m
@@ -107,14 +111,14 @@ func (m *Master) catchTimeOut() {
 	for {
 		time.Sleep(5 * time.Second)
 		mu.Lock()
-		if m.MasterPhase == Exit {
+		if m.MasterPhase == Exit { //判断master协程的状态
 			mu.Unlock()
 			return
 		}
-		for _, masterTask := range m.TaskMeta {
-			if masterTask.TaskStatus == InProgress && time.Now().Sub(masterTask.StartTime) > 10*time.Second {
-				m.TaskQueue <- masterTask.TaskReference
-				masterTask.TaskStatus = Idle
+		for _, masterTask := range m.TaskMeta { // 遍历每个task任务
+			if masterTask.TaskStatus == InProgress && time.Now().Sub(masterTask.StartTime) > 10*time.Second { // 如果任务超过10s
+				m.TaskQueue <- masterTask.TaskReference // 将任务重新放回任务队列
+				masterTask.TaskStatus = Idle            // 并设置它的状态
 			}
 		}
 		mu.Unlock()
@@ -130,16 +134,17 @@ func (m *Master) createMapTask() {
 			NReducer:   m.NReduce,
 			TaskNumber: idx, // 任务号
 		}
-		m.TaskQueue <- &taskMeta
+		m.TaskQueue <- &taskMeta // 将任务放进任务队列中
 		m.TaskMeta[idx] = &MasterTask{
-			TaskStatus:    Idle,
-			TaskReference: &taskMeta,
+			TaskStatus:    Idle,      // 设置任务初始值
+			TaskReference: &taskMeta, // 对应具体的任务
 		}
 	}
 }
 
+// 创建reduce任务
 func (m *Master) createReduceTask() {
-	m.TaskMeta = make(map[int]*MasterTask)
+	m.TaskMeta = make(map[int]*MasterTask) // 重置，开始保存reduce任务的信息
 	for idx, files := range m.Intermediates {
 		taskMeta := Task{
 			TaskState:     Reduce,
@@ -162,17 +167,17 @@ func max(a int, b int) int {
 	return b
 }
 
-// master等待worker调用
+// map任务执行时，调用此方法申请map任务
 func (m *Master) AssignTask(args *ExampleArgs, reply *Task) error {
 	// assignTask就看看自己queue里面还有没有task
 	mu.Lock()
 	defer mu.Unlock()
+
+	//有就发出去
 	if len(m.TaskQueue) > 0 {
-		//有就发出去
 		*reply = *<-m.TaskQueue
-		// 记录task的启动时间
-		m.TaskMeta[reply.TaskNumber].TaskStatus = InProgress
-		m.TaskMeta[reply.TaskNumber].StartTime = time.Now()
+		m.TaskMeta[reply.TaskNumber].TaskStatus = InProgress // 设置任务的状态
+		m.TaskMeta[reply.TaskNumber].StartTime = time.Now()  // 设置任务的时间
 	} else if m.MasterPhase == Exit {
 		*reply = Task{TaskState: Exit}
 	} else {
@@ -182,6 +187,7 @@ func (m *Master) AssignTask(args *ExampleArgs, reply *Task) error {
 	return nil
 }
 
+// map函数执行完后调用此方法
 func (m *Master) TaskCompleted(task *Task, reply *ExampleReply) error {
 	//更新task状态
 	mu.Lock()
@@ -205,18 +211,17 @@ func (m *Master) processTaskResult(task *Task) {
 			m.Intermediates[reduceTaskId] = append(m.Intermediates[reduceTaskId], filePath)
 		}
 		if m.allTaskDone() {
-			//获得所以map task后，进入reduce阶段
-			m.createReduceTask()
+			m.createReduceTask() // 所有map任务执行完成后，开始执行reduce任务
 			m.MasterPhase = Reduce
 		}
 	case Reduce:
 		if m.allTaskDone() {
-			//获得所以reduce task后，进入exit阶段
-			m.MasterPhase = Exit
+			m.MasterPhase = Exit // 所有reduce任务执行完成后，设置master的状态为结束
 		}
 	}
 }
 
+// 判断当前持有的所有task是否执行完成
 func (m *Master) allTaskDone() bool {
 	for _, task := range m.TaskMeta {
 		if task.TaskStatus != Completed {
